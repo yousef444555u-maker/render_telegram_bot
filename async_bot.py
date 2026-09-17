@@ -1,117 +1,44 @@
-import asyncio
-import logging
-import os
-
-import uvicorn
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import PlainTextResponse, Response
-from starlette.routing import Route
-
+import asyncio, logging, os, re, tempfile, uuid
+from urllib.parse import urlparse
+import yt_dlp
 from telegram import Update
-from telegram.ext import (
-    Application,
-    ContextTypes,
-    filters,
-    MessageHandler,
-)
-
-# Enable logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-# set higher logging level for httpx to avoid all GET and POST requests being logged
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
-
 logger = logging.getLogger(__name__)
-
-# Define configuration constants
-URL = os.environ.get("RENDER_EXTERNAL_URL")
-PORT = int(os.environ.get("PORT", 8000))
-TOKEN = os.environ.get("BOT_TOKEN")
-
-# Validate required environment variables
-if not TOKEN:
-    raise ValueError("BOT_TOKEN environment variable is required")
-
-# Determine mode: webhook if URL is provided, polling otherwise
-USE_WEBHOOK = URL is not None
-logger.info("Running in %s mode", "webhook" if USE_WEBHOOK else "polling")
-
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Echo the user message."""
-    user = update.effective_user
-    message = update.message.text if update.message else None
-
-    if not message:
-        logger.warning("Received update without text message")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN غير موجود!")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أهلا! أرسل رابط الفيديو (m3u8, mp4, hls, youtube...) وأنا أحمله لك 🎬")
+async def download_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    url = update.message.text.strip()
+    if not url.startswith("http"):
+        await update.message.reply_text("أرسل رابط صحيح يبدأ بـ http")
         return
-
-    logger.info("Received message from %s: %s", user.username or user.id, message)
-    await update.message.reply_text(message)
-
-
-async def main() -> None:
-    """Set up PTB application and run in webhook or polling mode."""
-    if USE_WEBHOOK:
-        # Webhook mode for production (Render)
-        logger.info("Starting webhook mode with URL: %s", URL)
-        application = Application.builder().token(TOKEN).updater(None).build()
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-        # Set webhook
-        await application.bot.set_webhook(url=f"{URL}/telegram")
-
-        # Setup web server
-        async def telegram(request: Request) -> Response:
-            data = await request.json()
-            await application.update_queue.put(Update.de_json(data, application.bot))
-            return Response()
-
-        async def health(_: Request) -> PlainTextResponse:
-            return PlainTextResponse("Bot is running!")
-
-        app = Starlette(
-            routes=[
-                Route("/telegram", telegram, methods=["POST"]),
-                Route("/healthcheck", health, methods=["GET"]),
-            ]
-        )
-
-        config = uvicorn.Config(app=app, port=PORT, host="0.0.0.0")
-        server = uvicorn.Server(config)
-
-        async with application:
-            await application.start()
-            await server.serve()
-            await application.stop()
-    else:
-        # Polling mode for local development
-        logger.info("Starting polling mode for local development")
-        application = Application.builder().token(TOKEN).build()
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
-
-        async with application:
-            await application.start()
-            await application.updater.start_polling()
-            logger.info("Bot started! Send a message to test it.")
-
-            # Keep running until interrupted
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                pass
-            finally:
-                await application.updater.stop()
-                await application.stop()
-
-
-if __name__ == "__main__":
+    status_msg = await update.message.reply_text("⏳ جاري التحميل...")
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, f"{uuid.uuid4()}.mp4")
+            ydl_opts = {'outtmpl': output_path,'format': 'best[ext=mp4]/best','merge_output_format': 'mp4','quiet': True,'no_warnings': True,'http_headers': {'User-Agent': 'Mozilla/5.0'}}
+            def run_download():
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([url])
+            await asyncio.to_thread(run_download)
+            files = os.listdir(tmpdir)
+            if not files:
+                raise Exception("فشل التحميل")
+            video_file = os.path.join(tmpdir, files[0])
+            await status_msg.edit_text("📤 جاري الرفع...")
+            await update.message.reply_video(video=open(video_file, 'rb'), caption="تم ✅", supports_streaming=True)
+            await status_msg.delete()
     except Exception as e:
-        logger.error("Bot failed to start: %s", e)
-        raise
+        logger.error(f"Error: {e}")
+        await status_msg.edit_text(f"❌ فشل: {str(e)[:200]}")
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, download_video))
+    app.run_polling()
+if __name__ == "__main__":
+    main()
