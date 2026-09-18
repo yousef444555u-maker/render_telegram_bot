@@ -1,27 +1,28 @@
+from flask import Flask, render_template, request, redirect
 import os
-import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-logging.basicConfig(level=logging.INFO)
-TOKEN = os.getenv("BOT_TOKEN")
+app = Flask(__name__)
+os.makedirs('static/uploads', exist_ok=True)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Ahlan! Sarmada Bot is LIVE ✅\nTry /help")
+videos = [
+    {"url": "https://www.w3schools.com/html/mov_bbb.mp4", "user": "@yousef", "desc": "تجربة مدرسية سرمدا"},
+    {"url": "https://www.w3schools.com/html/movie.mp4", "user": "@sarmada", "desc": "تطبيق ريلز بسيط"},
+]
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("I can help with all subjects! Just send your question.")
+@app.route('/')
+def home():
+    q = request.args.get('q', '').lower()
+    filtered = [v for v in videos if q in v['desc'].lower() or q in v['user'].lower()] if q else videos
+    return render_template('index.html', videos=filtered)
 
-async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"You said: {update.message.text}")
+@app.route('/upload', methods=['POST'])
+def upload():
+    file = request.files.get('video')
+    if file:
+        path = f"static/uploads/{file.filename}"
+        file.save(path)
+        videos.insert(0, {"url": f"/{path}", "user": "@yousef", "desc": request.form.get('desc','فيديو جديد')})
+    return redirect('/')
 
-def main():
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_msg))
-    print("Bot Started")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
